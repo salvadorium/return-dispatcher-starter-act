@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Клевер Маркет — диспетчер возвратов</title>
+  <style>
+    :root { color-scheme: light; --ink:#1f2933; --muted:#667085; --line:#e4e7ec; --green:#237a57; --pale:#f4f7f5; --red:#a43b3b; }
+    * { box-sizing:border-box; }
+    body { margin:0; font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif; background:#f6f7f8; color:var(--ink); }
+    header { background:white; border-bottom:1px solid var(--line); padding:16px 24px; display:flex; justify-content:space-between; align-items:center; gap:16px; }
+    h1 { font-size:20px; margin:0; } h2 { font-size:19px; margin:0 0 12px; } h3 { font-size:15px; margin:18px 0 8px; }
+    button,select { font:inherit; border:1px solid #cbd5d0; border-radius:8px; padding:8px 11px; background:white; color:var(--ink); cursor:pointer; }
+    button.primary { color:white; background:var(--green); border-color:var(--green); } button:disabled { opacity:.5; cursor:not-allowed; }
+    .layout { display:grid; grid-template-columns:310px minmax(0,1fr); gap:18px; padding:18px; max-width:1440px; margin:auto; }
+    aside,.panel { background:white; border:1px solid var(--line); border-radius:12px; }
+    aside { overflow:hidden; align-self:start; } .queue-head { padding:16px; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; }
+    #queue { max-height:calc(100vh - 150px); overflow:auto; } .case-row { display:block; width:100%; text-align:left; border:0; border-bottom:1px solid #f0f1f2; border-radius:0; padding:12px 16px; }
+    .case-row.active { background:#edf6f1; box-shadow:inset 3px 0 var(--green); } .case-row strong,.case-row small { display:block; } .case-row small,.muted { color:var(--muted); }
+    main { min-width:0; display:grid; gap:16px; align-content:start; }
+    .panel { padding:18px; } .topline { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; } .badge { display:inline-block; padding:4px 9px; border-radius:99px; background:#eef1f3; font-size:12px; }
+    .grid { display:grid; grid-template-columns:1fr 1fr; gap:14px; } .box { background:#fafbfb; border:1px solid var(--line); border-radius:9px; padding:12px; min-width:0; }
+    .box p { margin:6px 0; white-space:pre-wrap; overflow-wrap:anywhere; } ul { margin:6px 0; padding-left:20px; } li { margin:5px 0; }
+    .actions { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-top:14px; } .notice { padding:10px 12px; border-radius:8px; background:#f1f5f9; margin-top:12px; }
+    .error { color:var(--red); } .hidden { display:none!important; } pre { white-space:pre-wrap; overflow-wrap:anywhere; font:inherit; }
+    @media(max-width:850px) { .layout { grid-template-columns:1fr; } #queue { max-height:260px; } .grid { grid-template-columns:1fr; } }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Клевер Маркет · диспетчер возвратов</h1>
+    <label>Учебный контур
+      <select id="role"><option value="manager">Менеджер</option><option value="client">Клиент</option></select>
+    </label>
+  </header>
+  <div class="layout">
+    <aside>
+      <div class="queue-head"><strong>Очередь обращений</strong><span id="count" class="muted"></span></div>
+      <div id="queue"></div>
+    </aside>
+    <main>
+      <section id="empty" class="panel">Выберите обращение в очереди.</section>
+      <section id="details" class="panel hidden"></section>
+    </main>
+  </div>
+  <script>
+    const ROUTE_LABELS = {
+      RECOMMEND_APPROVE: "Рекомендовать возврат",
+      RECOMMEND_DENY: "Рекомендовать отказ",
+      NEED_MORE_INFORMATION: "Нужны сведения",
+      MANUAL_REVIEW: "Ручная проверка",
+      DUPLICATE_OR_PROCESSED: "Повторное / обработанное"
+    };
+    let activeCase = null;
+    const rolePicker = document.querySelector("#role");
+    const pageParams = new URLSearchParams(window.location.search);
+    if (["client", "manager"].includes(pageParams.get("role"))) {
+      rolePicker.value = pageParams.get("role");
+    }
+    const escapeHtml = value => String(value ?? "").replace(/[&<>"']/g, char => ({
+      "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;"
+    })[char]);
+    async function api(url, options = {}) {
+      const response = await fetch(url, {
+        ...options,
+        headers: {"Content-Type":"application/json", "X-Role":rolePicker.value, ...(options.headers || {})}
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || `Ошибка ${response.status}`);
+      return data;
+    }
+    function showError(error) {
+      let node = document.querySelector("#error");
+      if (!node) {
+        node = document.createElement("div");
+        node.id = "error";
+        node.className = "notice error";
+        document.querySelector("#details").prepend(node);
+      }
+      node.textContent = error.message;
+    }
+    async function loadQueue() {
+      const {cases} = await api("/api/cases");
+      document.querySelector("#count").textContent = cases.length;
+      document.querySelector("#queue").innerHTML = cases.map(item => `
+        <button class="case-row ${activeCase === item.case_id ? "active" : ""}" data-case="${escapeHtml(item.case_id)}">
+          <strong>${escapeHtml(item.case_id)} · ${escapeHtml(item.subject)}</strong>
+          <small>${escapeHtml(item.status)}${rolePicker.value === "manager" && item.route ? " · " + escapeHtml(ROUTE_LABELS[item.route]) : ""}</small>
+        </button>`).join("");
+      document.querySelectorAll(".case-row").forEach(button => button.addEventListener("click", () => selectCase(button.dataset.case)));
+      document.querySelector(".case-row.active")?.scrollIntoView({block:"nearest"});
+    }
+    function list(title, entries) {
+      if (!entries || !entries.length) return `<h3>${title}</h3><p class="muted">Нет записей</p>`;
+      return `<h3>${title}</h3><ul>${entries.map(entry => `<li>${escapeHtml(entry)}</li>`).join("")}</ul>`;
+    }
+    async function selectCase(caseId) {
+      activeCase = caseId;
+      await loadQueue();
+      await renderCase();
+    }
+    async function renderCase() {
+      if (!activeCase) return;
+      const area = document.querySelector("#details");
+      area.classList.remove("hidden");
+      document.querySelector("#empty").classList.add("hidden");
+      area.innerHTML = "<p>Загружаем обращение…</p>";
+      try {
+        const data = await api(`/api/cases/${encodeURIComponent(activeCase)}`);
+        const c = data.case;
+        const items = data.order?.items || [];
+        const orderFacts = data.order
+          ? `${escapeHtml(data.order.order_number)} · доставка ${escapeHtml(data.order.delivered_at)} · ${items.map(i => `${escapeHtml(i.name)} (${escapeHtml(i.price_rub)} ₽)`).join("; ")}`
+          : "Связанный заказ не найден";
+        const manager = rolePicker.value === "manager";
+        const analysis = data.analysis;
+        area.innerHTML = `
+          <div class="topline"><div><h2>${escapeHtml(c.case_id)} · ${escapeHtml(c.subject)}</h2><div class="muted">${escapeHtml(c.sender_name)} · ${escapeHtml(c.opened_at)} · заказ ${escapeHtml(c.order_number)}</div></div><span class="badge">${escapeHtml(data.status)}</span></div>
+          <div class="grid" style="margin-top:14px">
+            <div class="box"><strong>Ход диалога</strong><p><strong>Клиент:</strong> ${escapeHtml(c.letter)}</p>${data.client_draft ? `<hr><p><strong>Черновик агента · не отправлен:</strong> ${escapeHtml(data.client_draft)}</p>` : ""}</div>
+            <div class="box"><strong>Связанный заказ</strong><p>${orderFacts}</p></div>
+          </div>
+          ${manager ? `<div class="box" style="margin-top:12px"><strong>История по заказу</strong>${data.history?.length ? `<ul>${data.history.map(h => `<li>${escapeHtml(h.record_id)} · ${escapeHtml(h.status)} · ${escapeHtml(h.summary)}${h.authorization_reference ? " · " + escapeHtml(h.authorization_reference) : ""}</li>`).join("")}</ul>` : "<p>Совпадений нет.</p>"}</div>` : ""}
+          ${manager ? (analysis ? renderManager(analysis, data) : '<div class="actions"><button id="analyze" class="primary">Проверить факты и предложить маршрут</button></div>') : (data.client_message || data.client_draft ? renderClient(data) : '<div class="notice">Обращение ожидает проверки менеджером.</div>')}
+          <div id="error" class="notice error hidden"></div>`;
+        document.querySelector("#analyze")?.addEventListener("click", async event => {
+          event.currentTarget.disabled = true;
+          try { await api(`/api/cases/${encodeURIComponent(activeCase)}/analyze`, {method:"POST"}); await loadQueue(); await renderCase(); }
+          catch (error) { event.currentTarget.disabled = false; showError(error); }
+        });
+        document.querySelector("#decision")?.addEventListener("click", submitDecision);
+      } catch (error) { area.innerHTML = `<p class="error">${escapeHtml(error.message)}</p>`; }
+    }
+    function renderClient(data) {
+      const message = data.client_message || data.client_draft;
+      const label = data.client_message ? "Состояние обращения" : "Черновик клиенту";
+      return `<section class="panel" style="margin-top:14px"><h3>${label}</h3><p>${escapeHtml(message)}</p><p class="muted">Сообщение не отправлено. Рекомендация и менеджерские заметки клиентскому контуру не передаются.</p></section>`;
+    }
+    function renderManager(a, data) {
+      const facts = a.facts.map(f => `${f.label}: ${f.value} [${f.source}]`);
+      const history = a.history.map(h => `${h.record_id}: ${h.status}; ${h.reason_code}; ${h.summary}${h.authorization_reference ? "; разрешение " + h.authorization_reference : ""}`);
+      const model = a.model_suggestion
+        ? `<div class="notice">Предложение модели: ${escapeHtml(ROUTE_LABELS[a.model_suggestion.route])}. Серверный маршрут: ${escapeHtml(ROUTE_LABELS[a.route])}. Совпадает: ${a.model_suggestion.matched ? "да" : "нет"}; решение модели не меняет.</div>`
+        : "";
+      const modelDrafts = a.model_drafts
+        ? `<div class="grid"><div class="box"><strong>Черновик модели клиенту · только для проверки менеджером</strong><p>${escapeHtml(a.model_drafts.client)}</p></div><div class="box"><strong>Черновик модели менеджеру</strong><p>${escapeHtml(a.model_drafts.manager)}</p></div></div>`
+        : "";
+      const resolved = data.manager_decision
+        ? `<div class="notice">Решение менеджера: ${escapeHtml(data.manager_decision)}. Итог: ${escapeHtml(data.status)}${data.authorization_reference ? " · учебное разрешение " + escapeHtml(data.authorization_reference) : ""}</div>`
+        : "";
+      return `<section class="panel" style="margin-top:14px">
+        <div class="topline"><div><h2>Рекомендация агента</h2><p><strong>${escapeHtml(ROUTE_LABELS[a.route])}</strong> <span class="badge">${escapeHtml(a.route)}</span></p></div></div>
+        <p>${escapeHtml(a.reason)}</p>${model}
+        <div class="grid">
+          <div class="box">${list("Найденные факты", facts)}${list("Применённые правила", a.policy_refs)}</div>
+          <div class="box">${list("История", history)}${list("Недостающие сведения", a.missing_information)}</div>
+        </div>
+        <div class="grid" style="margin-top:12px">
+          <div class="box"><strong>Черновик клиенту</strong><p>${escapeHtml(a.client_draft)}</p></div>
+          <div class="box"><strong>Материал менеджеру</strong><p>${escapeHtml(a.manager_draft)}</p></div>
+        </div>${modelDrafts}${resolved}${!data.manager_decision ? decisionControl() : ""}
+      </section>`;
+    }
+    function decisionControl() {
+      return `<div class="actions">
+        <select id="manager-action">
+          <option value="CONFIRM_RECOMMENDATION">Подтвердить предложенный маршрут</option>
+          <option value="OVERRIDE_DENY">Изменить решение на отказ</option>
+          <option value="REQUEST_INFORMATION">Запросить недостающие сведения</option>
+          <option value="MANUAL_REVIEW">Передать на ручную проверку</option>
+          <option value="MARK_DUPLICATE">Отметить повторным (при наличии истории)</option>
+        </select>
+        <button id="decision" class="primary">Зафиксировать решение</button>
+      </div><p class="muted">Разрешение создаётся только при подтверждении серверного маршрута RECOMMEND_APPROVE.</p>`;
+    }
+    async function submitDecision(event) {
+      event.currentTarget.disabled = true;
+      try {
+        await api(`/api/cases/${encodeURIComponent(activeCase)}/decision`, {
+          method:"POST",
+          body:JSON.stringify({action:document.querySelector("#manager-action").value})
+        });
+        await loadQueue();
+        await renderCase();
+      } catch (error) { event.currentTarget.disabled = false; showError(error); }
+    }
+    rolePicker.addEventListener("change", async () => { await loadQueue(); await renderCase(); });
+    (async function init() {
+      try {
+        await loadQueue();
+        const requestedCase = pageParams.get("case");
+        const selected = [...document.querySelectorAll(".case-row")].find(button => button.dataset.case === requestedCase)
+          || document.querySelector(".case-row");
+        if (selected) await selectCase(selected.dataset.case);
+      } catch (error) { document.querySelector("#empty").textContent = error.message; }
+    })();
+  </script>
+</body>
+</html>
