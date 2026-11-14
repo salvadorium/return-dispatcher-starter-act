@@ -236,6 +236,7 @@ def _analyze(case, order, history, policies):
         return {
             "route": "MANUAL_REVIEW",
             "reason": "Не найден связанный заказ; требуется ручная сверка.",
+            "stop_reason": "Заказ не найден; дело ожидает ручной сверки менеджером.",
             "facts": facts,
             "missing_information": [],
             "policy_refs": ["P-2", "P-6"],
@@ -276,7 +277,9 @@ def _analyze(case, order, history, policies):
         explicit_damage = _has_reported_damage(text)
         external_request = any(word in text for word in ("курьер", "обмен", "поменять", "прислать", "сегодня же"))
         high_value = category == "HIGH_VALUE_ELECTRONICS" or item["price_rub"] >= 30000
-        if high_value or explicit_damage or external_request:
+        if high_value or external_request or (
+            explicit_damage and category != "KITCHEN_APPLIANCES"
+        ):
             route = "MANUAL_REVIEW"
             refs.append("P-6")
             if high_value:
@@ -387,10 +390,16 @@ def _analyze(case, order, history, policies):
                 if not use_known:
                     missing.append("Уточните, включали ли прибор после доставки.")
                 if not complete:
-                    missing.append("Подтвердите полноту комплекта, включая принадлежности и документы.")
+                    missing.append(
+                        "Подтвердите, пожалуйста, что в комплекте есть все принадлежности и документы?"
+                    )
                 if missing:
                     route = "NEED_MORE_INFORMATION"
                     reason = "Для нового обращения по C-5 не хватает сведений; найденное обращение про насадку по другой причине не является повтором."
+                elif explicit_damage:
+                    route = "MANUAL_REVIEW"
+                    refs.append("P-6")
+                    reason = "Комплект и остальные сведения подтверждены, но заявленная потёртость требует проверки менеджером."
                 else:
                     route = "RECOMMEND_APPROVE"
                     reason = "История по тому же основанию не найдена; обязательные сведения по C-5 предоставлены."
@@ -399,11 +408,18 @@ def _analyze(case, order, history, policies):
             refs.append("P-6")
             reason = f"Категория {category} не имеет автоматического правила в этом контуре."
 
-    client_draft = (
-        "Чтобы продолжить рассмотрение, уточните: " + " ".join(missing)
-        if route == "NEED_MORE_INFORMATION"
-        else "Мы получили ваше обращение. Менеджер проверит информацию; решение пока не принято. Это сообщение — черновик, оно не отправлено."
-    )
+    if route == "NEED_MORE_INFORMATION":
+        client_draft = " ".join(missing)
+        stop_reason = "Ожидание обязательных сведений: " + " ".join(missing)
+    elif route == "MANUAL_REVIEW":
+        client_draft = "Мы получили ваше обращение. Менеджер проверит информацию; решение пока не принято. Это сообщение — черновик, оно не отправлено."
+        stop_reason = reason
+    elif route == "DUPLICATE_OR_PROCESSED":
+        client_draft = "Мы получили ваше обращение. Менеджер проверит информацию; решение пока не принято. Это сообщение — черновик, оно не отправлено."
+        stop_reason = reason
+    else:
+        client_draft = "Мы получили ваше обращение. Менеджер проверит информацию; решение пока не принято. Это сообщение — черновик, оно не отправлено."
+        stop_reason = "Ожидание решения менеджера."
     manager_draft = (
         f"Маршрут: {route}. Основание: {reason} "
         f"Применить: {', '.join(dict.fromkeys(refs))}. "
@@ -412,6 +428,7 @@ def _analyze(case, order, history, policies):
     return {
         "route": route,
         "reason": reason,
+        "stop_reason": stop_reason,
         "facts": facts,
         "missing_information": missing,
         "policy_refs": list(dict.fromkeys(refs)),
@@ -621,6 +638,7 @@ def create_app(test_config=None):
             {
                 "sources": ["open-cases.json", "orders.json", "return-history.json", *POLICY_FILES],
                 "route": analysis["route"],
+                "stop_reason": analysis["stop_reason"],
                 "state_from": "OPEN",
                 "state_to": "WAITING_MANAGER",
                 "policy_refs": analysis["policy_refs"],
@@ -695,6 +713,7 @@ def create_app(test_config=None):
             {
                 "action": action,
                 "recommendation": route,
+                "stop_reason": analysis["stop_reason"],
                 "state_from": "WAITING_MANAGER",
                 "state_to": final_status,
                 "authorization_created": authorization_reference is not None,

@@ -22,7 +22,7 @@ EXPECTED_ROUTES = {
     "RC-6011": "RECOMMEND_DENY",
     "RC-6012": "MANUAL_REVIEW",
     "RC-6013": "RECOMMEND_DENY",
-    "RC-6014": "MANUAL_REVIEW",
+    "RC-6014": "NEED_MORE_INFORMATION",
     "RC-6015": "DUPLICATE_OR_PROCESSED",
     "RC-6016": "RECOMMEND_APPROVE",
 }
@@ -199,13 +199,34 @@ class ReturnDispatcherTests(unittest.TestCase):
         )
         self.assertEqual(repeated.status_code, 409)
 
-    def test_unrelated_kitchen_history_and_damage_go_to_manual_review(self):
-        result = self.client.post(
+    def test_kitchen_case_requests_only_missing_kit_and_logs_stop_reason(self):
+        response = self.client.post(
             "/api/cases/RC-6014/analyze", headers=self.headers("manager")
-        ).json["analysis"]
-        self.assertEqual(result["route"], "MANUAL_REVIEW")
-        self.assertTrue(any("полноту комплекта" in question for question in result["missing_information"]))
+        )
+        result = response.json["analysis"]
+        expected_question = "Подтвердите, пожалуйста, что в комплекте есть все принадлежности и документы?"
+        self.assertEqual(result["route"], "NEED_MORE_INFORMATION")
+        self.assertEqual(result["missing_information"], [expected_question])
+        self.assertEqual(result["client_draft"], expected_question)
         self.assertEqual(result["history"][0]["reason_code"], "USE_INSTRUCTIONS")
+        self.assertIn("по другой причине", result["reason"])
+
+        audit = self.client.get("/api/audit", headers=self.headers("manager")).json["events"]
+        analysis_event = next(event for event in audit if event["event_type"] == "analysis_created")
+        self.assertIn(expected_question, analysis_event["details"]["stop_reason"])
+
+        decision = self.client.post(
+            "/api/cases/RC-6014/decision",
+            headers=self.headers("manager"),
+            json={"action": "REQUEST_INFORMATION"},
+        )
+        self.assertEqual(decision.json["status"], "WAITING_FOR_CUSTOMER")
+        client_view = self.client.get(
+            "/api/cases/RC-6014", headers=self.headers("client")
+        ).json
+        self.assertEqual(client_view["client_message"], expected_question)
+        self.assertNotIn("analysis", client_view)
+        self.assertNotIn("manager_decision", client_view)
 
     def test_order_fact_lists_every_item_in_multi_item_order(self):
         result = self.client.post(
